@@ -604,7 +604,7 @@ function parseTD3(l1, l2) {
     docNum:   checkDigitOK(docNum, chkDocNum),
     birth:    checkDigitOK(birthDate, chkBirth),
     exp:      checkDigitOK(expDate, chkExp),
-    personal: chkPers !== '<' ? checkDigitOK(personal + chkPers, l2[42]) : null,
+    personal: personal.replace(/</g,'').length > 0 ? checkDigitOK(personal, chkPers) : null,
     final:    checkDigitOK(finalStr, chkFinal),
   };
 
