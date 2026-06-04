@@ -799,15 +799,27 @@ async function captureFrame() {
   document.getElementById('btn-capture').classList.add('hidden');
   document.getElementById('btn-retry').classList.remove('hidden');
 
-  // 4. Recortar SOLO la franja inferior donde está el MRZ
-  //    El MRZ ocupa aprox el 25% inferior del documento
-  //    Tomamos el 35% inferior de la imagen capturada para tener margen
-  const cropH = Math.floor(full.height * 0.35);
-  const cropY = full.height - cropH;
+  // 4. Recortar EXACTAMENTE lo que muestra el recuadro verde en pantalla
+  //    Calculamos las coordenadas del scan-frame en píxeles de vídeo real
+  const camWrap  = document.getElementById('cam-wrap');
+  const frameEl  = camWrap.querySelector('.scan-frame');
+  const wrapRect  = camWrap.getBoundingClientRect();
+  const frameRect = frameEl.getBoundingClientRect();
+
+  // Ratio entre píxeles de vídeo real y píxeles CSS mostrados
+  const scaleX = full.width  / wrapRect.width;
+  const scaleY = full.height / wrapRect.height;
+
+  // Coordenadas del recuadro en píxeles de vídeo
+  const cropX = Math.floor((frameRect.left - wrapRect.left) * scaleX);
+  const cropY = Math.floor((frameRect.top  - wrapRect.top)  * scaleY);
+  const cropW = Math.floor(frameRect.width  * scaleX);
+  const cropH = Math.floor(frameRect.height * scaleY);
+
   const crop = document.createElement('canvas');
-  crop.width  = full.width;
+  crop.width  = cropW;
   crop.height = cropH;
-  crop.getContext('2d').drawImage(full, 0, cropY, full.width, cropH, 0, 0, full.width, cropH);
+  crop.getContext('2d').drawImage(full, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
   // 5. Escalar el recorte x2 para mejorar OCR (Tesseract funciona mejor con texto grande)
   const scaled = document.createElement('canvas');
