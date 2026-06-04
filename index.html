@@ -135,9 +135,18 @@
   .scan-overlay { position: absolute; inset: 0; pointer-events: none; }
   .scan-frame {
     position: absolute;
-    left: 8%; right: 8%;
-    top: 50%; transform: translateY(-55%);
-    height: 40%;
+    left: 4%; right: 4%;
+    bottom: 8%;
+    height: 32%;
+  }
+  .scan-frame-label {
+    position: absolute;
+    top: -22px; left: 0; right: 0;
+    text-align: center;
+    font-size: 11px;
+    color: rgba(255,255,255,0.75);
+    font-weight: 500;
+    letter-spacing: 0.3px;
   }
   .corner { position: absolute; width: 22px; height: 22px; }
   .corner::before, .corner::after { content: ''; position: absolute; background: #1D9E75; }
@@ -384,19 +393,21 @@
     <div id="section-cam">
       <div class="camera-wrap" id="cam-wrap">
         <video id="video" autoplay playsinline muted></video>
+      <canvas id="cam-freeze" style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover;"></canvas>
         <div class="cam-idle-bg" id="cam-idle">
           <svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
           Cámara inactiva
         </div>
         <div class="scan-overlay" id="scan-overlay" style="display:none;">
           <div class="scan-frame">
+            <div class="scan-frame-label">▼ Zona MRZ aquí ▼</div>
             <div class="corner tl"></div>
             <div class="corner tr"></div>
             <div class="corner bl"></div>
             <div class="corner br"></div>
             <div class="scan-line"></div>
           </div>
-          <div class="cam-hint">Centra la zona MRZ dentro del recuadro</div>
+          <div class="cam-hint">Pon la zona de códigos (parte inferior del doc) dentro del recuadro verde</div>
         </div>
       </div>
 
@@ -412,6 +423,10 @@
         <button class="btn primary hidden" id="btn-capture" onclick="captureFrame()">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M20.94 11A8.994 8.994 0 1 0 21 12.7"/><polyline points="22 4 22 8 18 8"/></svg>
           Capturar
+        </button>
+        <button class="btn hidden" id="btn-retry" onclick="unfreezeCamera()">
+          <svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3"/></svg>
+          Reintentar
         </button>
       </div>
 
@@ -763,15 +778,61 @@ function stopCamera() {
 async function captureFrame() {
   if (ocrBusy) return;
   ocrBusy = true;
-  setStatus('busy','Procesando imagen OCR…');
+
   const video = document.getElementById('video');
-  const canvas = document.getElementById('canvas');
-  canvas.width  = video.videoWidth  || 1280;
-  canvas.height = video.videoHeight || 720;
-  canvas.getContext('2d').drawImage(video, 0, 0);
+
+  // 1. PAUSAR el video — congela el frame en memoria y en pantalla
+  video.pause();
+
+  // 2. Capturar frame completo
+  const full = document.getElementById('canvas');
+  full.width  = video.videoWidth  || 1280;
+  full.height = video.videoHeight || 720;
+  full.getContext('2d').drawImage(video, 0, 0);
+
+  // 3. Mostrar snapshot congelado encima del video
+  const freeze = document.getElementById('cam-freeze');
+  freeze.width  = full.width;
+  freeze.height = full.height;
+  freeze.getContext('2d').drawImage(full, 0, 0);
+  freeze.style.display = 'block';
+  document.getElementById('btn-capture').classList.add('hidden');
+  document.getElementById('btn-retry').classList.remove('hidden');
+
+  // 4. Recortar SOLO la franja inferior donde está el MRZ
+  //    El MRZ ocupa aprox el 25% inferior del documento
+  //    Tomamos el 35% inferior de la imagen capturada para tener margen
+  const cropH = Math.floor(full.height * 0.35);
+  const cropY = full.height - cropH;
+  const crop = document.createElement('canvas');
+  crop.width  = full.width;
+  crop.height = cropH;
+  crop.getContext('2d').drawImage(full, 0, cropY, full.width, cropH, 0, 0, full.width, cropH);
+
+  // 5. Escalar el recorte x2 para mejorar OCR (Tesseract funciona mejor con texto grande)
+  const scaled = document.createElement('canvas');
+  scaled.width  = crop.width  * 2;
+  scaled.height = crop.height * 2;
+  const sCtx = scaled.getContext('2d');
+  sCtx.imageSmoothingEnabled = false;
+  sCtx.drawImage(crop, 0, 0, scaled.width, scaled.height);
+
+  // 6. Aumentar contraste para que los caracteres MRZ destaquen
+  const iData = sCtx.getImageData(0, 0, scaled.width, scaled.height);
+  const d = iData.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const avg = (d[i] + d[i+1] + d[i+2]) / 3;
+    const v = avg < 128 ? 0 : 255;
+    d[i] = d[i+1] = d[i+2] = v;
+  }
+  sCtx.putImageData(iData, 0, 0);
+
+  setStatus('busy','Analizando MRZ…');
+
   try {
-    const { data: { text } } = await Tesseract.recognize(canvas, 'eng', {
+    const { data: { text } } = await Tesseract.recognize(scaled, 'eng', {
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
+      tessedit_pageseg_mode: '6',
     });
     const lines = text.split('\n')
       .map(l => l.replace(/[^A-Z0-9<]/g,'').trim())
@@ -781,12 +842,23 @@ async function captureFrame() {
       setStatus('ok','Documento leído correctamente');
       renderResult(result);
     } else {
-      setStatus('fail','No se detectó MRZ. Prueba mejor iluminación o modo manual.');
+      setStatus('fail','No se detectó MRZ. Ajusta el encuadre y reintenta.');
+      unfreezeCamera();
     }
   } catch(e) {
     setStatus('fail','Error OCR: '+e.message);
+    unfreezeCamera();
   }
   ocrBusy = false;
+}
+
+function unfreezeCamera() {
+  const video = document.getElementById('video');
+  document.getElementById('cam-freeze').style.display = 'none';
+  document.getElementById('btn-capture').classList.remove('hidden');
+  document.getElementById('btn-retry').classList.add('hidden');
+  // Reanudar stream en vivo
+  video.play();
 }
 
 function parseManual() {
@@ -897,6 +969,7 @@ function clearResult() {
   document.getElementById('result-section').classList.add('hidden');
   document.getElementById('mrz-input').value = '';
   setStatus('idle','Esperando documento…');
+  unfreezeCamera();
   window.scrollTo({top: 0, behavior: 'smooth'});
 }
 </script>
