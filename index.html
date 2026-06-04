@@ -142,9 +142,9 @@
   /* Marco interior — zona MRZ exacta que se recorta y procesa */
   .mrz-frame {
     position: absolute;
-    left: 4%; right: 4%;
+    left: 2%; right: 2%;
     bottom: 0;
-    height: 28%;
+    height: 20%;
     border: 2px solid #1D9E75;
     border-radius: 4px;
     background: rgba(29,158,117,0.08);
@@ -617,10 +617,16 @@ function parseTD3(l1, l2) {
   const docCode    = l1.slice(0,2);
   const issuing    = l1.slice(2,5);
   const namePart   = l1.slice(5,44);
-  const nameSplit  = namePart.split('<<');
-  const lastName1  = cleanField((nameSplit[0] || '').split('<')[0]);
-  const lastName2  = cleanField((nameSplit[0] || '').split('<')[1] || '');
-  const firstNames = cleanField((nameSplit.slice(1).join(' ') || ''));
+  // Formato: APELLIDO1<APELLIDO2<<NOMBRE<NOMBRE2<<<<
+  // '<<' separa bloque apellidos del bloque nombres
+  // '<'  separa apellido1 de apellido2 (dentro del bloque apellidos)
+  const dblIdx     = namePart.indexOf('<<');
+  const surnameBlock = dblIdx >= 0 ? namePart.slice(0, dblIdx) : namePart;
+  const givenBlock   = dblIdx >= 0 ? namePart.slice(dblIdx + 2) : '';
+  const surnameParts = surnameBlock.split('<').filter(s => s.length > 0);
+  const lastName1  = surnameParts[0] || '';
+  const lastName2  = surnameParts[1] || '';
+  const firstNames = givenBlock.split('<').filter(s => s.length > 0).join(' ');
 
   // Line 2
   const docNum     = l2.slice(0,9);
@@ -651,9 +657,10 @@ function parseTD3(l1, l2) {
     docType: docTypeLabel(docCode),
     docCode: cleanCode(docCode),
     issuingState: issuing,
-    lastName1, lastName2,
-    firstName: firstNames,
-    fullName: [lastName1, lastName2].filter(n => n && n !== '—').join(' ') + ', ' + firstNames,
+    lastName1: cleanField(lastName1),
+    lastName2: cleanField(lastName2),
+    firstName: cleanField(firstNames),
+    fullName: [cleanField(lastName1), cleanField(lastName2)].filter(n => n && n !== '—').join(' ') + ', ' + cleanField(firstNames),
     documentNumber: cleanCode(docNum),
     nationality,
     birthDate: l2.slice(13,19),
@@ -685,12 +692,14 @@ function parseTD1(l1, l2, l3) {
   const optional2  = l2.slice(18,29);
   const chkFinal   = l2[29];
 
-  const namePart   = l3;
-  const nameSplit  = namePart.split('<<');
-  const surnameRaw = (nameSplit[0] || '').split('<');
-  const lastName1  = cleanField(surnameRaw[0] || '');
-  const lastName2  = cleanField(surnameRaw[1] || '');
-  const firstName  = cleanField(nameSplit.slice(1).join(' ') || '');
+  const namePart     = l3;
+  const dblIdxT      = namePart.indexOf('<<');
+  const surnameBlockT = dblIdxT >= 0 ? namePart.slice(0, dblIdxT) : namePart;
+  const givenBlockT   = dblIdxT >= 0 ? namePart.slice(dblIdxT + 2) : '';
+  const surnamePartsT = surnameBlockT.split('<').filter(s => s.length > 0);
+  const lastName1  = surnamePartsT[0] || '';
+  const lastName2  = surnamePartsT[1] || '';
+  const firstName  = givenBlockT.split('<').filter(s => s.length > 0).join(' ');
 
   const finalStr   = l1.slice(5,30) + l2.slice(0,7) + l2.slice(8,15) + l2.slice(18,29);
   const checks = {
@@ -706,9 +715,10 @@ function parseTD1(l1, l2, l3) {
     docType: docTypeLabel(docCode),
     docCode: cleanCode(docCode),
     issuingState: issuing,
-    lastName1, lastName2,
-    firstName,
-    fullName: [lastName1, lastName2].filter(n => n && n !== '—').join(' ') + ', ' + firstName,
+    lastName1: cleanField(lastName1),
+    lastName2: cleanField(lastName2),
+    firstName: cleanField(firstName),
+    fullName: [cleanField(lastName1), cleanField(lastName2)].filter(n => n && n !== '—').join(' ') + ', ' + cleanField(firstName),
     documentNumber: cleanCode(docNum),
     nationality,
     birthDate,
@@ -820,40 +830,60 @@ async function captureFrame() {
   document.getElementById('btn-capture').classList.add('hidden');
   document.getElementById('btn-retry').classList.remove('hidden');
 
-  // 4. Recortar EXACTAMENTE el marco interior MRZ (mrz-frame)
-  //    Usamos offsetTop/offsetLeft para coordenadas relativas al padre, sin scroll
-  const MARGIN  = 16;
-  const camWrap = document.getElementById('cam-wrap');
-  const mrzEl   = document.getElementById('mrz-frame');
-  const docEl   = mrzEl.closest('.doc-frame');
+  // 4. Recortar EXACTAMENTE el marco interior MRZ
+  //
+  // El problema: el <video> tiene object-fit:cover, así que la imagen real
+  // que captura la cámara es MÁS GRANDE que lo que se ve en pantalla.
+  // Hay que calcular qué parte del frame real corresponde a lo visible,
+  // y luego mapear el mrz-frame dentro de eso.
+  //
+  // Paso A: dimensiones reales del vídeo capturado
+  const vidW = full.width;   // ej: 1920
+  const vidH = full.height;  // ej: 1080
 
-  // Posición del mrz-frame relativa al cam-wrap en píxeles CSS
-  // offsetParent chain: mrz-frame → doc-frame → scan-overlay → cam-wrap
-  function offsetRelativeTo(el, ancestor) {
-    let top = 0, left = 0;
-    let cur = el;
-    while (cur && cur !== ancestor) {
-      top  += cur.offsetTop;
-      left += cur.offsetLeft;
-      cur   = cur.offsetParent;
-    }
-    return { top, left };
+  // Paso B: dimensiones CSS del cam-wrap (lo que ve el usuario en pantalla)
+  const camWrap  = document.getElementById('cam-wrap');
+  const mrzEl    = document.getElementById('mrz-frame');
+  const wrapRect = camWrap.getBoundingClientRect();  // posición/tamaño en pantalla
+  const mrzRect  = mrzEl.getBoundingClientRect();    // posición/tamaño en pantalla
+
+  const dispW = wrapRect.width;   // ancho CSS visible del video
+  const dispH = wrapRect.height;  // alto CSS visible del video
+
+  // Paso C: calcular cómo object-fit:cover escala y recorta el frame real
+  // cover = escala la imagen para que cubra todo el contenedor manteniendo ratio
+  const vidAspect  = vidW / vidH;
+  const dispAspect = dispW / dispH;
+
+  let renderW, renderH, offsetX, offsetY;
+  if (vidAspect > dispAspect) {
+    // El vídeo es más ancho que el contenedor → se recortan los lados
+    renderH = vidH;
+    renderW = vidH * dispAspect;
+    offsetX = (vidW - renderW) / 2;
+    offsetY = 0;
+  } else {
+    // El vídeo es más alto que el contenedor → se recortan arriba y abajo
+    renderW = vidW;
+    renderH = vidW / dispAspect;
+    offsetX = 0;
+    offsetY = (vidH - renderH) / 2;
   }
-  const mrzOff = offsetRelativeTo(mrzEl, camWrap);
-  const cssX = mrzOff.left;
-  const cssY = mrzOff.top;
-  const cssW = mrzEl.offsetWidth;
-  const cssH = mrzEl.offsetHeight;
 
-  // Ratio píxeles vídeo real / píxeles CSS mostrados en camWrap
-  const scaleX = full.width  / camWrap.offsetWidth;
-  const scaleY = full.height / camWrap.offsetHeight;
+  // Paso D: ratio entre el área renderizada y los píxeles CSS visibles
+  const scaleX = renderW / dispW;
+  const scaleY = renderH / dispH;
 
-  // Coordenadas en píxeles reales de vídeo + margen de seguridad
-  const cropX = Math.max(0, Math.floor(cssX * scaleX) - MARGIN);
-  const cropY = Math.max(0, Math.floor(cssY * scaleY) - MARGIN);
-  const cropW = Math.min(full.width  - cropX, Math.floor(cssW * scaleX) + MARGIN * 2);
-  const cropH = Math.min(full.height - cropY, Math.floor(cssH * scaleY) + MARGIN * 2);
+  // Paso E: posición del mrz-frame relativa al cam-wrap en píxeles CSS
+  const relLeft = mrzRect.left - wrapRect.left;
+  const relTop  = mrzRect.top  - wrapRect.top;
+
+  // Paso F: traducir a píxeles reales del frame capturado
+  const MARGIN = 14;
+  const cropX = Math.max(0, Math.floor(offsetX + relLeft * scaleX) - MARGIN);
+  const cropY = Math.max(0, Math.floor(offsetY + relTop  * scaleY) - MARGIN);
+  const cropW = Math.min(vidW - cropX, Math.floor(mrzRect.width  * scaleX) + MARGIN * 2);
+  const cropH = Math.min(vidH - cropY, Math.floor(mrzRect.height * scaleY) + MARGIN * 2);
 
   const crop = document.createElement('canvas');
   crop.width  = cropW;
