@@ -929,9 +929,94 @@ async function captureFrame() {
     // DEBUG: mostrar texto crudo del OCR
     document.getElementById('debug-text').textContent = 'OCR raw: ' + text.replace(/\n/g,' | ');
 
-    const lines = text.split('\n')
-      .map(l => l.replace(/[^A-Z0-9<]/g,'').trim())
+    // Corrección de errores de OCR en texto MRZ
+    // Tesseract confunde caracteres del font OCR-B con letras normales
+    function fixMRZLine(raw) {
+      // Primero limpiamos todo lo que no sea alfanumérico o <
+      let s = raw.replace(/[^A-Z0-9<]/gi, '').toUpperCase();
+
+      // En MRZ solo existen A-Z, 0-9 y '<'
+      // Errores más frecuentes de Tesseract con OCR-B:
+      //   'C' → '<'  (el más común, confunde el relleno con C)
+      //   'L' → '<'  (también muy frecuente)
+      //   'I' → '1'  en zona numérica
+      //   'O' → '0'  en zona numérica
+      //   'S' → '5'  en zona numérica
+      //   'B' → '8'  en zona numérica
+      //   'G' → '6'  en zona numérica
+      //   'Z' → '2'  en zona numérica
+
+      // Estrategia: detectar si la línea tiene el patrón MRZ correcto
+      // y aplicar correcciones posicionales según el tipo de campo
+
+      // Paso 1: si hay una secuencia de >=3 C o L consecutivos, es casi seguro '<'
+      // (un nombre real raramente tiene CCCC o LLLL seguidos)
+      s = s.replace(/C{2,}/g, m => '<'.repeat(m.length));
+      s = s.replace(/L{3,}/g, m => '<'.repeat(m.length));
+
+      // Paso 2: si vemos 'C' justo al lado de '<', también es '<'
+      s = s.replace(/<C/g, '<<').replace(/C</g, '<<');
+      s = s.replace(/<L/g, '<<').replace(/L</g, '<<');
+
+      return s;
+    }
+
+    // Para TD3: la línea 2 tiene zonas fijas numéricas y alfanuméricas
+    function fixTD3Line2(s) {
+      // Estructura TD3 línea 2:
+      // [0-8]  nº doc (alfanum)
+      // [9]    check (num)
+      // [10-12] nacionalidad (alfa)
+      // [13-18] fecha nac (num)
+      // [19]   check (num)
+      // [20]   sexo (M/F/<)
+      // [21-26] fecha exp (num)
+      // [27]   check (num)
+      // [28-41] personal (alfanum)
+      // [42]   check (num)
+      // [43]   check global (num)
+      const numPos = [9,13,14,15,16,17,18,19,21,22,23,24,25,26,27,42,43];
+      const arr = s.split('');
+      const numMap = {'O':'0','I':'1','S':'5','B':'8','G':'6','Z':'2','C':'0','L':'1','A':'4'};
+      for (const p of numPos) {
+        if (arr[p] && numMap[arr[p]]) arr[p] = numMap[arr[p]];
+      }
+      // Posición 20: solo M, F o <
+      if (arr[20] && !['M','F','<'].includes(arr[20])) arr[20] = '<';
+      return arr.join('');
+    }
+
+    function fixTD3Line1(s) {
+      // [0] tipo doc (P/I/A/C/V)
+      // [1] subtipo o <
+      // [2-4] país emisor (alfa)
+      // [5-43] nombres (alfa y <)
+      // En la zona de nombres, los números son errores → reemplazar por letra similar
+      const arr = s.split('');
+      const alphaMap = {'0':'O','1':'I','5':'S','8':'B','6':'G','2':'Z'};
+      for (let i = 5; i < arr.length; i++) {
+        if (alphaMap[arr[i]]) arr[i] = alphaMap[arr[i]];
+      }
+      return arr.join('');
+    }
+
+    const rawLines = text.split('\n')
+      .map(l => l.replace(/[^A-Z0-9<]/gi,'').trim().toUpperCase())
       .filter(l => l.length >= 26);
+
+    // Aplicar correcciones
+    const lines = rawLines.map(l => {
+      let fixed = fixMRZLine(l);
+      // Detectar si es línea 1 o 2 de TD3 por longitud y primer carácter
+      if (fixed.length >= 44) {
+        if (/^[PAICV]/.test(fixed)) {
+          fixed = fixTD3Line1(fixed.slice(0,44));
+        } else {
+          fixed = fixTD3Line2(fixed.slice(0,44));
+        }
+      }
+      return fixed;
+    }).filter(l => l.length >= 26);
     const result = parseMRZLines(lines);
     if (result) {
       setStatus('ok','Documento leído correctamente');
