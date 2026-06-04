@@ -821,22 +821,39 @@ async function captureFrame() {
   document.getElementById('btn-retry').classList.remove('hidden');
 
   // 4. Recortar EXACTAMENTE el marco interior MRZ (mrz-frame)
-  //    + margen de seguridad de 12px a cada lado por si acaso
-  const MARGIN   = 12;
-  const camWrap  = document.getElementById('cam-wrap');
-  const mrzEl    = document.getElementById('mrz-frame');
-  const wrapRect = camWrap.getBoundingClientRect();
-  const mrzRect  = mrzEl.getBoundingClientRect();
+  //    Usamos offsetTop/offsetLeft para coordenadas relativas al padre, sin scroll
+  const MARGIN  = 16;
+  const camWrap = document.getElementById('cam-wrap');
+  const mrzEl   = document.getElementById('mrz-frame');
+  const docEl   = mrzEl.closest('.doc-frame');
 
-  // Ratio píxeles vídeo real / píxeles CSS en pantalla
-  const scaleX = full.width  / wrapRect.width;
-  const scaleY = full.height / wrapRect.height;
+  // Posición del mrz-frame relativa al cam-wrap en píxeles CSS
+  // offsetParent chain: mrz-frame → doc-frame → scan-overlay → cam-wrap
+  function offsetRelativeTo(el, ancestor) {
+    let top = 0, left = 0;
+    let cur = el;
+    while (cur && cur !== ancestor) {
+      top  += cur.offsetTop;
+      left += cur.offsetLeft;
+      cur   = cur.offsetParent;
+    }
+    return { top, left };
+  }
+  const mrzOff = offsetRelativeTo(mrzEl, camWrap);
+  const cssX = mrzOff.left;
+  const cssY = mrzOff.top;
+  const cssW = mrzEl.offsetWidth;
+  const cssH = mrzEl.offsetHeight;
 
-  // Coordenadas del marco MRZ en píxeles de vídeo + margen
-  const cropX = Math.max(0, Math.floor((mrzRect.left - wrapRect.left) * scaleX) - MARGIN);
-  const cropY = Math.max(0, Math.floor((mrzRect.top  - wrapRect.top)  * scaleY) - MARGIN);
-  const cropW = Math.min(full.width  - cropX, Math.floor(mrzRect.width  * scaleX) + MARGIN * 2);
-  const cropH = Math.min(full.height - cropY, Math.floor(mrzRect.height * scaleY) + MARGIN * 2);
+  // Ratio píxeles vídeo real / píxeles CSS mostrados en camWrap
+  const scaleX = full.width  / camWrap.offsetWidth;
+  const scaleY = full.height / camWrap.offsetHeight;
+
+  // Coordenadas en píxeles reales de vídeo + margen de seguridad
+  const cropX = Math.max(0, Math.floor(cssX * scaleX) - MARGIN);
+  const cropY = Math.max(0, Math.floor(cssY * scaleY) - MARGIN);
+  const cropW = Math.min(full.width  - cropX, Math.floor(cssW * scaleX) + MARGIN * 2);
+  const cropH = Math.min(full.height - cropY, Math.floor(cssH * scaleY) + MARGIN * 2);
 
   const crop = document.createElement('canvas');
   crop.width  = cropW;
@@ -851,24 +868,16 @@ async function captureFrame() {
   sCtx.imageSmoothingEnabled = false;
   sCtx.drawImage(crop, 0, 0, scaled.width, scaled.height);
 
-  // 6. Preprocesar para OCR: escala de grises → brillo +30 → umbral adaptativo
+  // 6. Preprocesar para OCR: escala de grises + contraste suave (sin umbral agresivo)
   const iData = sCtx.getImageData(0, 0, scaled.width, scaled.height);
   const d = iData.data;
-  // Primero calculamos el brillo medio para umbral adaptativo
-  let sum = 0;
+  const factor = 1.5; // factor de contraste (1 = sin cambio, 2 = máximo)
   for (let i = 0; i < d.length; i += 4) {
-    sum += (d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114);
-  }
-  const avgBright = sum / (d.length / 4);
-  // Umbral = media + offset (si fondo claro, umbral más alto; si fondo oscuro, más bajo)
-  const threshold = Math.min(Math.max(avgBright * 0.85, 90), 180);
-  for (let i = 0; i < d.length; i += 4) {
-    // Escala de grises ponderada (percepción humana)
+    // Escala de grises ponderada
     let gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
-    // Subir brillo +40 antes del umbral
-    gray = Math.min(255, gray + 40);
-    const v = gray < threshold ? 0 : 255;
-    d[i] = d[i+1] = d[i+2] = v;
+    // Contraste suave alrededor del punto medio (128)
+    gray = Math.min(255, Math.max(0, (gray - 128) * factor + 128));
+    d[i] = d[i+1] = d[i+2] = gray;
   }
   sCtx.putImageData(iData, 0, 0);
 
