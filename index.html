@@ -133,20 +133,30 @@
   }
   .cam-idle-bg svg { width: 40px; height: 40px; opacity: 0.4; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .scan-overlay { position: absolute; inset: 0; pointer-events: none; }
-  .scan-frame {
+  /* Marco exterior — guía para encuadrar el documento */
+  .doc-frame {
+    position: absolute;
+    left: 5%; right: 5%;
+    top: 6%; bottom: 6%;
+  }
+  /* Marco interior — zona MRZ exacta que se recorta y procesa */
+  .mrz-frame {
     position: absolute;
     left: 4%; right: 4%;
-    bottom: 8%;
-    height: 32%;
+    bottom: 0;
+    height: 28%;
+    border: 2px solid #1D9E75;
+    border-radius: 4px;
+    background: rgba(29,158,117,0.08);
   }
-  .scan-frame-label {
+  .mrz-frame-label {
     position: absolute;
-    top: -22px; left: 0; right: 0;
+    top: -20px; left: 0; right: 0;
     text-align: center;
-    font-size: 11px;
-    color: rgba(255,255,255,0.75);
-    font-weight: 500;
-    letter-spacing: 0.3px;
+    font-size: 10px; font-weight: 600;
+    color: #1D9E75;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
   }
   .corner { position: absolute; width: 22px; height: 22px; }
   .corner::before, .corner::after { content: ''; position: absolute; background: #1D9E75; }
@@ -399,15 +409,19 @@
           Cámara inactiva
         </div>
         <div class="scan-overlay" id="scan-overlay" style="display:none;">
-          <div class="scan-frame">
-            <div class="scan-frame-label">▼ Zona MRZ aquí ▼</div>
+          <!-- Marco exterior: guía para encuadrar el documento completo -->
+          <div class="doc-frame">
             <div class="corner tl"></div>
             <div class="corner tr"></div>
             <div class="corner bl"></div>
             <div class="corner br"></div>
-            <div class="scan-line"></div>
+            <!-- Marco interior: zona MRZ exacta que se recorta -->
+            <div class="mrz-frame" id="mrz-frame">
+              <div class="mrz-frame-label">MRZ</div>
+              <div class="scan-line"></div>
+            </div>
           </div>
-          <div class="cam-hint">Pon la zona de códigos (parte inferior del doc) dentro del recuadro verde</div>
+          <div class="cam-hint">Encuadra el documento completo · El OCR solo lee la franja MRZ</div>
         </div>
       </div>
 
@@ -799,22 +813,23 @@ async function captureFrame() {
   document.getElementById('btn-capture').classList.add('hidden');
   document.getElementById('btn-retry').classList.remove('hidden');
 
-  // 4. Recortar EXACTAMENTE lo que muestra el recuadro verde en pantalla
-  //    Calculamos las coordenadas del scan-frame en píxeles de vídeo real
+  // 4. Recortar EXACTAMENTE el marco interior MRZ (mrz-frame)
+  //    + margen de seguridad de 12px a cada lado por si acaso
+  const MARGIN   = 12;
   const camWrap  = document.getElementById('cam-wrap');
-  const frameEl  = camWrap.querySelector('.scan-frame');
-  const wrapRect  = camWrap.getBoundingClientRect();
-  const frameRect = frameEl.getBoundingClientRect();
+  const mrzEl    = document.getElementById('mrz-frame');
+  const wrapRect = camWrap.getBoundingClientRect();
+  const mrzRect  = mrzEl.getBoundingClientRect();
 
-  // Ratio entre píxeles de vídeo real y píxeles CSS mostrados
+  // Ratio píxeles vídeo real / píxeles CSS en pantalla
   const scaleX = full.width  / wrapRect.width;
   const scaleY = full.height / wrapRect.height;
 
-  // Coordenadas del recuadro en píxeles de vídeo
-  const cropX = Math.floor((frameRect.left - wrapRect.left) * scaleX);
-  const cropY = Math.floor((frameRect.top  - wrapRect.top)  * scaleY);
-  const cropW = Math.floor(frameRect.width  * scaleX);
-  const cropH = Math.floor(frameRect.height * scaleY);
+  // Coordenadas del marco MRZ en píxeles de vídeo + margen
+  const cropX = Math.max(0, Math.floor((mrzRect.left - wrapRect.left) * scaleX) - MARGIN);
+  const cropY = Math.max(0, Math.floor((mrzRect.top  - wrapRect.top)  * scaleY) - MARGIN);
+  const cropW = Math.min(full.width  - cropX, Math.floor(mrzRect.width  * scaleX) + MARGIN * 2);
+  const cropH = Math.min(full.height - cropY, Math.floor(mrzRect.height * scaleY) + MARGIN * 2);
 
   const crop = document.createElement('canvas');
   crop.width  = cropW;
@@ -829,12 +844,23 @@ async function captureFrame() {
   sCtx.imageSmoothingEnabled = false;
   sCtx.drawImage(crop, 0, 0, scaled.width, scaled.height);
 
-  // 6. Aumentar contraste para que los caracteres MRZ destaquen
+  // 6. Preprocesar para OCR: escala de grises → brillo +30 → umbral adaptativo
   const iData = sCtx.getImageData(0, 0, scaled.width, scaled.height);
   const d = iData.data;
+  // Primero calculamos el brillo medio para umbral adaptativo
+  let sum = 0;
   for (let i = 0; i < d.length; i += 4) {
-    const avg = (d[i] + d[i+1] + d[i+2]) / 3;
-    const v = avg < 128 ? 0 : 255;
+    sum += (d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114);
+  }
+  const avgBright = sum / (d.length / 4);
+  // Umbral = media + offset (si fondo claro, umbral más alto; si fondo oscuro, más bajo)
+  const threshold = Math.min(Math.max(avgBright * 0.85, 90), 180);
+  for (let i = 0; i < d.length; i += 4) {
+    // Escala de grises ponderada (percepción humana)
+    let gray = d[i] * 0.299 + d[i+1] * 0.587 + d[i+2] * 0.114;
+    // Subir brillo +40 antes del umbral
+    gray = Math.min(255, gray + 40);
+    const v = gray < threshold ? 0 : 255;
     d[i] = d[i+1] = d[i+2] = v;
   }
   sCtx.putImageData(iData, 0, 0);
