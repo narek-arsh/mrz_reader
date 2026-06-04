@@ -382,7 +382,7 @@
       </span>
       MRZ Reader
     </h1>
-    <p>Pasaportez · DNIs europeos · Tarjetas de identidad</p>
+    <p>Pasaportes · DNIs europeos · Tarjetas de identidad</p>
   </div>
 
   <div class="content">
@@ -470,6 +470,13 @@
     <div class="status-bar idle" id="status-bar">
       <div class="status-dot"></div>
       <span id="status-text">Esperando documento…</span>
+    </div>
+
+    <!-- DEBUG: muestra qué ve Tesseract -->
+    <div id="debug-section" class="hidden" style="margin-bottom:1rem;">
+      <p style="font-size:11px;color:var(--hint);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.8px;font-weight:500;">Lo que ve el OCR</p>
+      <canvas id="debug-canvas" style="width:100%;border-radius:8px;border:1px solid var(--border);display:block;"></canvas>
+      <p id="debug-text" style="font-family:monospace;font-size:10px;color:var(--sub);margin-top:6px;word-break:break-all;line-height:1.8;"></p>
     </div>
 
     <!-- RESULT -->
@@ -865,6 +872,14 @@ async function captureFrame() {
   }
   sCtx.putImageData(iData, 0, 0);
 
+  // DEBUG: mostrar exactamente lo que va a Tesseract
+  const dbgSection = document.getElementById('debug-section');
+  const dbgCanvas  = document.getElementById('debug-canvas');
+  dbgCanvas.width  = scaled.width;
+  dbgCanvas.height = scaled.height;
+  dbgCanvas.getContext('2d').drawImage(scaled, 0, 0);
+  dbgSection.classList.remove('hidden');
+
   setStatus('busy','Analizando MRZ…');
 
   try {
@@ -872,6 +887,9 @@ async function captureFrame() {
       tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<',
       tessedit_pageseg_mode: '6',
     });
+    // DEBUG: mostrar texto crudo del OCR
+    document.getElementById('debug-text').textContent = 'OCR raw: ' + text.replace(/\n/g,' | ');
+
     const lines = text.split('\n')
       .map(l => l.replace(/[^A-Z0-9<]/g,'').trim())
       .filter(l => l.length >= 26);
